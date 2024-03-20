@@ -6,10 +6,20 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
+# ==========================================================================================
+#
+# Adobe’s modifications are Copyright 2023 Adobe Research. All rights reserved.
+# Adobe’s modifications are licensed under the Adobe Research License. To view a copy of the license, visit
+# LICENSE.md.
+#
+# ==========================================================================================
+
 """Train a GAN using the techniques described in the paper
 "Training Generative Adversarial Networks with Limited Data"."""
 
 import os
+from pathlib import Path
+import shutil
 import click
 import re
 import json
@@ -21,6 +31,7 @@ from training import training_loop
 from metrics import metric_main
 from torch_utils import training_stats
 from torch_utils import custom_ops
+from expansion_utils import io_utils
 
 #----------------------------------------------------------------------------
 
@@ -64,6 +75,19 @@ def setup_training_loop_kwargs(
     allow_tf32 = None, # Allow PyTorch to use TF32 for matmul and convolutions: <bool>, default = False
     nobench    = None, # Disable cuDNN benchmarking: <bool>, default = False
     workers    = None, # Override number of DataLoader workers: <int>, default = 3
+
+    # Domain Expansion additions
+    wandb_log = None,
+    name       = '',
+    tag        = '',
+    expansion_cfg_file = None,
+    debug=False,
+    latent_factors_path = None,
+    subspace_distance = None,
+    lambda_recon_l2 = None,
+    lambda_recon_lpips = None,
+    lambda_src = None,
+    lambda_expand = None,
 ):
     args = dnnlib.EasyDict()
 
@@ -87,7 +111,10 @@ def setup_training_loop_kwargs(
     args.network_snapshot_ticks = snap
 
     if metrics is None:
-        metrics = ['fid50k_full']
+        if debug:
+            metrics = ['kid1k_full']
+        else:
+            metrics = ['fid50k_full']
     assert isinstance(metrics, list)
     if not all(metric_main.is_valid_metric(metric) for metric in metrics):
         raise UserError('\n'.join(['--metrics can only contain the following values:'] + metric_main.list_valid_metrics()))
@@ -153,7 +180,7 @@ def setup_training_loop_kwargs(
 
     cfg_specs = {
         'auto':      dict(ref_gpus=-1, kimg=25000,  mb=-1, mbstd=-1, fmaps=-1,  lrate=-1,     gamma=-1,   ema=-1,  ramp=0.05, map=2), # Populated dynamically based on resolution and GPU count.
-        'stylegan2': dict(ref_gpus=8,  kimg=25000,  mb=32, mbstd=4,  fmaps=1,   lrate=0.002,  gamma=10,   ema=10,  ramp=None, map=8), # Uses mixed-precision, unlike the original StyleGAN2.
+        'stylegan2': dict(ref_gpus=8,  kimg=25000,  mb=32, mbstd=4,  fmaps=1,   lrate=0.001,  gamma=10,   ema=10,  ramp=None, map=8), # Uses mixed-precision, unlike the original StyleGAN2.
         'paper256':  dict(ref_gpus=8,  kimg=25000,  mb=64, mbstd=8,  fmaps=0.5, lrate=0.0025, gamma=1,    ema=20,  ramp=None, map=8),
         'paper512':  dict(ref_gpus=8,  kimg=25000,  mb=64, mbstd=8,  fmaps=1,   lrate=0.0025, gamma=0.5,  ema=20,  ramp=None, map=8),
         'paper1024': dict(ref_gpus=8,  kimg=25000,  mb=32, mbstd=4,  fmaps=1,   lrate=0.002,  gamma=2,    ema=10,  ramp=None, map=8),
@@ -184,7 +211,7 @@ def setup_training_loop_kwargs(
 
     args.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=spec.lrate, betas=[0,0.99], eps=1e-8)
     args.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=spec.lrate, betas=[0,0.99], eps=1e-8)
-    args.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.StyleGAN2Loss', r1_gamma=spec.gamma)
+    args.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.DomainExpansionLoss', r1_gamma=spec.gamma)
 
     args.total_kimg = spec.kimg
     args.batch_size = spec.mb
@@ -356,6 +383,28 @@ def setup_training_loop_kwargs(
             raise UserError('--workers must be at least 1')
         args.data_loader_kwargs.num_workers = workers
 
+    # Domain Expansion additions
+    args.wandb_log = wandb_log
+    args.run_name = name
+    args.run_tag = tag
+    args.debug = debug
+    args.latent_factors_path = latent_factors_path
+    
+    args.loss_kwargs.subspace_distance = subspace_distance
+    args.loss_kwargs.batch_size = args.batch_gpu
+    args.loss_kwargs.lambda_recon_l2 = lambda_recon_l2
+    args.loss_kwargs.lambda_recon_lpips = lambda_recon_lpips
+    args.loss_kwargs.lambda_expand = lambda_expand
+    args.loss_kwargs.lambda_src = lambda_src
+
+    args.loss_kwargs.expansion_cfg = io_utils.process_config(expansion_cfg_file)
+
+    if debug:
+        args.kimg_per_tick = (10 / 1000) * args.batch_gpu # Every 10 batches
+    else:
+        args.kimg_per_tick = 1 * args.batch_gpu # Increase tick once for every 1000 BATCHES.
+
+
     return desc, args
 
 #----------------------------------------------------------------------------
@@ -401,7 +450,7 @@ class CommaSeparatedList(click.ParamType):
 # General options.
 @click.option('--outdir', help='Where to save the results', required=True, metavar='DIR')
 @click.option('--gpus', help='Number of GPUs to use [default: 1]', type=int, metavar='INT')
-@click.option('--snap', help='Snapshot interval [default: 50 ticks]', type=int, metavar='INT')
+@click.option('--snap', help='Snapshot interval [default: 10 ticks]', type=int, metavar='INT')
 @click.option('--metrics', help='Comma-separated list or "none" [default: fid50k_full]', type=CommaSeparatedList())
 @click.option('--seed', help='Random seed [default: 0]', type=int, metavar='INT')
 @click.option('-n', '--dry-run', help='Print training options and exit', is_flag=True)
@@ -413,7 +462,7 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--mirror', help='Enable dataset x-flips [default: false]', type=bool, metavar='BOOL')
 
 # Base config.
-@click.option('--cfg', help='Base config [default: auto]', type=click.Choice(['auto', 'stylegan2', 'paper256', 'paper512', 'paper1024', 'cifar']))
+@click.option('--cfg', help='Base config [default: auto]', type=click.Choice(['auto', 'stylegan2', 'paper256', 'paper512', 'paper1024', 'cifar', 'my8', 'my1']))
 @click.option('--gamma', help='Override R1 gamma', type=float)
 @click.option('--kimg', help='Override training duration', type=int, metavar='INT')
 @click.option('--batch', help='Override batch size', type=int, metavar='INT')
@@ -435,50 +484,27 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--allow-tf32', help='Allow PyTorch to use TF32 internally', type=bool, metavar='BOOL')
 @click.option('--workers', help='Override number of DataLoader workers', type=int, metavar='INT')
 
+# Domain Expansion additions
+# logging
+@click.option('--wandb_log', help='Use Wandb for logging', type=bool, metavar='BOOL', default=True)
+@click.option('--name', help='Wandb run name', type=str, required=True)
+@click.option('--tag', help='Wandb run tag', type=str, required=True)
+
+# Run configuration
+@click.option('--expansion_cfg_file', help='Path to file specifying the expansions', metavar='PATH', required=True)
+@click.option('--latent_factors_path', help='Path to decomposition of latent space', metavar='PATH')
+
+# Debug
+@click.option('--debug', help='Debug run, taking shortcuts', type=bool, metavar='BOOL', default=False)
+
+# hyperparameters
+@click.option('--subspace_distance', help='Distance to edit hyperplane', type=float, default=20)
+@click.option('--lambda_recon_l2', help='Relative weight of base reconstruction loss - L2', type=float, default=10)
+@click.option('--lambda_recon_lpips', help='Relative weight of base reconstruction loss - lpips', type=float, default=10)
+@click.option('--lambda_src', help='Relative weight of the source loss', type=float, default=1)
+@click.option('--lambda_expand', help='Relative weight of edit loss', type=float, default=1)
+
 def main(ctx, outdir, dry_run, **config_kwargs):
-    """Train a GAN using the techniques described in the paper
-    "Training Generative Adversarial Networks with Limited Data".
-
-    Examples:
-
-    \b
-    # Train with custom dataset using 1 GPU.
-    python train.py --outdir=~/training-runs --data=~/mydataset.zip --gpus=1
-
-    \b
-    # Train class-conditional CIFAR-10 using 2 GPUs.
-    python train.py --outdir=~/training-runs --data=~/datasets/cifar10.zip \\
-        --gpus=2 --cfg=cifar --cond=1
-
-    \b
-    # Transfer learn MetFaces from FFHQ using 4 GPUs.
-    python train.py --outdir=~/training-runs --data=~/datasets/metfaces.zip \\
-        --gpus=4 --cfg=paper1024 --mirror=1 --resume=ffhq1024 --snap=10
-
-    \b
-    # Reproduce original StyleGAN2 config F.
-    python train.py --outdir=~/training-runs --data=~/datasets/ffhq.zip \\
-        --gpus=8 --cfg=stylegan2 --mirror=1 --aug=noaug
-
-    \b
-    Base configs (--cfg):
-      auto       Automatically select reasonable defaults based on resolution
-                 and GPU count. Good starting point for new datasets.
-      stylegan2  Reproduce results for StyleGAN2 config F at 1024x1024.
-      paper256   Reproduce results for FFHQ and LSUN Cat at 256x256.
-      paper512   Reproduce results for BreCaHAD and AFHQ at 512x512.
-      paper1024  Reproduce results for MetFaces at 1024x1024.
-      cifar      Reproduce results for CIFAR-10 at 32x32.
-
-    \b
-    Transfer learning source networks (--resume):
-      ffhq256        FFHQ trained at 256x256 resolution.
-      ffhq512        FFHQ trained at 512x512 resolution.
-      ffhq1024       FFHQ trained at 1024x1024 resolution.
-      celebahq256    CelebA-HQ trained at 256x256 resolution.
-      lsundog256     LSUN Dog trained at 256x256 resolution.
-      <PATH or URL>  Custom network pickle.
-    """
     dnnlib.util.Logger(should_flush=True)
 
     # Setup training options.
@@ -488,15 +514,12 @@ def main(ctx, outdir, dry_run, **config_kwargs):
         ctx.fail(err)
 
     # Pick output directory.
-    prev_run_dirs = []
-    if os.path.isdir(outdir):
-        prev_run_dirs = [x for x in os.listdir(outdir) if os.path.isdir(os.path.join(outdir, x))]
-    prev_run_ids = [re.match(r'^\d+', x) for x in prev_run_dirs]
-    prev_run_ids = [int(x.group()) for x in prev_run_ids if x is not None]
-    cur_run_id = max(prev_run_ids, default=-1) + 1
-    args.run_dir = os.path.join(outdir, f'{cur_run_id:05d}-{run_desc}')
+    args.run_dir = os.path.join(outdir, args.run_name)
+    if args.debug:
+        print('WARNING: debug run, deleting previous run with this name')
+        shutil.rmtree(args.run_dir, ignore_errors=True)
     assert not os.path.exists(args.run_dir)
-
+    
     # Print options.
     print()
     print('Training options:')
@@ -512,16 +535,27 @@ def main(ctx, outdir, dry_run, **config_kwargs):
     print(f'Dataset x-flips:    {args.training_set_kwargs.xflip}')
     print()
 
+    # Create output directory.
+    print('Creating output directory...')
+    os.makedirs(args.run_dir)
+    os.makedirs(os.path.join(args.run_dir, 'images'))
+    os.makedirs(os.path.join(args.run_dir, 'ckpts'))
+    with open(os.path.join(args.run_dir, 'training_options.json'), 'wt') as f:
+        json.dump(args, f, indent=2)
+
+    with open(os.path.join(args.run_dir, 'expansion_cfg.json'), 'wt') as f:
+        json.dump(args.loss_kwargs.expansion_cfg, f, indent=2)
+
+
+    code_out_dir = Path(args.run_dir).joinpath('code')
+    code_out_dir.mkdir()
+    shutil.copyfile(__file__, code_out_dir.joinpath('train.py'))
+    shutil.copytree(Path(__file__).parent.joinpath('training'), code_out_dir.joinpath('training'))
+
     # Dry run?
     if dry_run:
         print('Dry run; exiting.')
         return
-
-    # Create output directory.
-    print('Creating output directory...')
-    os.makedirs(args.run_dir)
-    with open(os.path.join(args.run_dir, 'training_options.json'), 'wt') as f:
-        json.dump(args, f, indent=2)
 
     # Launch processes.
     print('Launching processes...')
