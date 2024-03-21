@@ -259,14 +259,13 @@ class DomainExpansionLoss(Loss):
         return logits
 
     def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c, sync, gain):
-        assert phase in ['G_adv', 'G_reg', 'G_all', 'D_adv',
-                         'D_reg', 'D_all', 'G_expand_and_recon', 'G_expand', 'G_recon']
-        do_Gmain = (phase in ['G_adv', 'G_all']) and self.lambda_src > 0
-        do_Dmain = (phase in ['D_adv', 'D_all']) and self.lambda_src > 0
-        do_Gpl = (phase in ['G_reg', 'G_all']) and (self.pl_weight != 0)
-        do_Dr1 = (phase in ['D_reg', 'D_all']) and (self.r1_gamma != 0)
-        do_Gexpand = (phase in ['G_expand', 'Gall', 'G_expand_and_recon']) and self.lambda_expand > 0
-        do_Grecon = (phase in ['G_recon', 'Gall', 'G_expand_and_recon']) and (self.lambda_recon_l2 > 0 or self.lambda_recon_l2 > 0)
+        assert phase in ['Gmain', 'Greg', 'Gall', 'Dmain', 'Dreg', 'Dall', 'Gboth', 'Gexpand', 'Grecon']
+        do_Gmain = (phase in ['Gmain', 'Gall']) and self.lambda_src > 0
+        do_Dmain = (phase in ['Dmain', 'Dall']) and self.lambda_src > 0
+        do_Gpl = (phase in ['Greg', 'Gall']) and (self.pl_weight != 0)
+        do_Dr1 = (phase in ['Dreg', 'Dall']) and (self.r1_gamma != 0)
+        do_Gexpand = (phase in ['Gexpand', 'Gall', 'Gboth']) and self.lambda_expand > 0
+        do_Grecon = (phase in ['Grecon', 'Gall', 'Gboth']) and (self.lambda_recon_l2 > 0 or self.lambda_recon_l2 > 0)
 
         if do_Gexpand or do_Grecon:
             name = 'G_edit_recon' if do_Gexpand and do_Grecon else 'G_edit' if do_Gexpand else 'G_recon'
@@ -328,21 +327,14 @@ class DomainExpansionLoss(Loss):
             with torch.autograd.profiler.record_function('Gmain_forward'):
                 w = self.G_mapping(gen_z, gen_c)[:, 0]
                 if self.lambda_expand > 0:
-                    # Apply the original loss (L_src) only on the base subspace.
-                    w, _ = latent_operations.project_to_subspaces(w,
-                                                                  self.latent_basis,
-                                                                  self.repurposed_dims,
-                                                                  mean=self.w_avg)
+                    w, _ = latent_operations.project_to_subspaces(w, self.latent_basis, self.repurposed_dims, mean=self.w_avg)
 
                 # May get synced by Gpl.
-                gen_img = self.run_G_from_w(self.G_synthesis,
-                                            w,
-                                            sync=(sync and not do_Gpl))  # May get synced by Gpl.
+                gen_img = self.run_G_from_w(self.G_synthesis, w, sync=(sync and not do_Gpl))  # May get synced by Gpl.
 
                 gen_logits = self.run_D(gen_img, gen_c, sync=False)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
-                # -log(sigmoid(gen_logits))
                 loss_Gmain = torch.nn.functional.softplus(-gen_logits)
                 training_stats.report('Loss/G/loss', loss_Gmain)
             with torch.autograd.profiler.record_function('Gmain_backward'):
@@ -377,10 +369,7 @@ class DomainExpansionLoss(Loss):
                 w = self.G_mapping(gen_z, gen_c)[:, 0]
                 if self.lambda_expand > 0:
                     # Apply the original loss (L_src) only on the base subspace.
-                    w, _ = latent_operations.project_to_subspaces(w,
-                                                                  self.latent_basis,
-                                                                  self.repurposed_dims,
-                                                                  mean=self.w_avg)
+                    w, _ = latent_operations.project_to_subspaces(w, self.latent_basis, self.repurposed_dims, mean=self.w_avg)
 
                 # May get synced by Gpl.
                 gen_img = self.run_G_from_w(self.G_synthesis, w, sync=False)
@@ -406,24 +395,20 @@ class DomainExpansionLoss(Loss):
 
                 loss_Dreal = 0
                 if do_Dmain:
-                    # -log(sigmoid(real_logits))
                     loss_Dreal = torch.nn.functional.softplus(-real_logits)
-                    training_stats.report(
-                        'Loss/D/loss', loss_Dgen + loss_Dreal)
+                    training_stats.report('Loss/D/loss', loss_Dgen + loss_Dreal)
 
                 loss_Dr1 = 0
                 if do_Dr1:
                     with torch.autograd.profiler.record_function('r1_grads'), conv2d_gradfix.no_weight_gradients():
-                        r1_grads = torch.autograd.grad(outputs=[real_logits.sum()], inputs=[
-                                                       real_img_tmp], create_graph=True, only_inputs=True)[0]
+                        r1_grads = torch.autograd.grad(outputs=[real_logits.sum()], inputs=[real_img_tmp], create_graph=True, only_inputs=True)[0]
                     r1_penalty = r1_grads.square().sum([1, 2, 3])
                     loss_Dr1 = r1_penalty * (self.r1_gamma / 2)
                     training_stats.report('Loss/r1_penalty', r1_penalty)
                     training_stats.report('Loss/D/reg', loss_Dr1)
 
             with torch.autograd.profiler.record_function(name + '_backward'):
-                (real_logits * 0 + loss_Dreal + 
-                 loss_Dr1).mean().mul(gain).backward()
+                (real_logits * 0 + loss_Dreal + loss_Dr1).mean().mul(gain).backward()
 
     # ----------------
 
