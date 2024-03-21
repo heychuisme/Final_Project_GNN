@@ -1,7 +1,7 @@
  {
     "tasks": [
-      {"type": "NADA", "dimension": 510, "args": {"source_text": "photo","target_text": "sketch"}},
-      {"type": "NADA", "args": {"source_text": "person","target_text": "tolkein elf"}}
+      {"type": "NADA", "args": {"source_text": "photo of a cat","target_text": "sketch"}},
+      {"type": "NADA", "args": {"source_text": "photo of a cat","target_text": "tongue out"}}
     ],
     "tasks_losses": {
         "NADA" : {
