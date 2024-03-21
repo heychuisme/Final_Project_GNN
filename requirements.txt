@@ -11,7 +11,7 @@ idna==3.6
 imageio-ffmpeg==0.4.3
 lpips==0.1.4
 ninja==1.11.1.1
-numpy @ file:///D:/bld/numpy_1687808486521/work
+numpy
 pathtools==0.1.2
 Pillow==9.0.0
 protobuf==4.25.3
@@ -28,7 +28,7 @@ smmap==5.0.1
 torch==1.7.1+cu110
 torchvision==0.8.2+cu110
 tqdm==4.66.2
-typing_extensions @ file:///home/conda/feedstock_root/build_artifacts/typing_extensions_1708904622550/work
+typing_extensions
 urllib3==2.2.1
 wandb==0.13.9
 wcwidth==0.2.13
