@@ -267,71 +267,73 @@ class DomainExpansionLoss(Loss):
         do_Gexpand = (phase in ['Gexpand', 'Gall', 'Gboth']) and self.lambda_expand > 0
         do_Grecon = (phase in ['Grecon', 'Gall', 'Gboth']) and (self.lambda_recon_l2 > 0 or self.lambda_recon_l2 > 0)
 
+        def compute_expansion_loss(w_new, indices_new, context_new, base_imgs, sync):
+            batch = torch.arange(self.batch_size)
+            w_new = w_new[0, indices_new, batch, :]
+            imgs_new = self.run_G_from_w(self.G_synthesis, w_new, sync=sync)
+            iter_dims = self.repurposed_dims[indices_new]
+
+            loss_funcs = np.array([self.tasks[dim.item()].calc_loss for dim in iter_dims])
+            unique_loss_funcs = list(set(loss_funcs))
+            loss_G_expand = 0
+
+            for loss_func in unique_loss_funcs:
+                indices_for_loss_func = batch_indices[(loss_funcs == loss_func)]
+                edit_imgs = imgs_new[indices_for_loss_func]
+                original_imgs = base_imgs[indices_for_loss_func]
+                contexts = [context_new[i] for i in indices_for_loss_func]
+
+                loss_G_expand += loss_func(contexts, original_imgs, edit_imgs, self.device)
+
+            return loss_G_expand / self.batch_size
+
+        def compute_reconstruction_loss(w_base, base_imgs):
+            with torch.no_grad():
+                frozen_base_imgs = self.run_G_from_w(self.G_synthesis_frozen, w_base, sync=False)
+
+            loss_l2 = self.mse_loss(base_imgs, frozen_base_imgs)
+            loss_lpips = self.lpips(base_imgs, frozen_base_imgs).mean()
+
+            training_stats.report('Loss/G/base_recon_l2', loss_l2)
+            training_stats.report('Loss/G/base_recon_lpips', loss_lpips)
+
+            return self.lambda_recon_l2 * loss_l2 + self.lambda_recon_lpips * loss_lpips
+        
         if do_Gexpand or do_Grecon:
-            name = 'G_edit_recon' if do_Gexpand and do_Grecon else 'G_edit' if do_Gexpand else 'G_recon'
-            with torch.autograd.profiler.record_function(name + '_forward'):
-                w, iter_indices, iter_context = self.sample_expansion_data()
-                base_w, edit_w = latent_operations.project_to_subspaces(w,
-                                                                        self.latent_basis,
-                                                                        self.repurposed_dims,
-                                                                        step_size=self.subspace_distance,
-                                                                        mean=self.w_avg)
-                base_imgs = self.run_G_from_w(self.G_synthesis, base_w,
-                                              sync=(sync and not do_Gpl))  # May get synced by Gpl.
 
-                loss_G_expand = 0
+            # Determine the operation name based on conditions
+            name_suffix = 'edit_recon' if do_Gexpand and do_Grecon else 'edit' if do_Gexpand else 'recon'
+            operation_name = f'G_{name_suffix}_forward'
+
+            with torch.autograd.profiler.record_function(operation_name):
+                w, indices_new, context_new = self.sample_expansion_data()
+                w_base, w_new = latent_operations.project_to_subspaces(
+                    w, self.latent_basis, self.repurposed_dims, step_size=self.subspace_distance, mean=self.w_avg)
+                
+                # Generate base images from original latents
+                base_imgs = self.run_G_from_w(self.G_synthesis, w_base, sync=(sync and not do_Gpl))
+
                 if do_Gexpand:
-                    all_batch = torch.arange(0, self.batch_size)
-                    # Take only latents used in this iter, by index
-                    edit_w = edit_w[0, iter_indices, all_batch, :]
-                    edit_imgs = self.run_G_from_w(self.G_synthesis, edit_w,
-                                                  sync=(sync and not do_Gpl))  # May get synced by Gpl.
-                    iter_dims = self.repurposed_dims[iter_indices]
-                    loss_funcs = np.array([self.tasks[dim.item()].calc_loss for dim in iter_dims])
-                    unique_loss_funcs = list(set(loss_funcs))
+                    loss_G_expand = compute_expansion_loss(w_new, indices_new, context_new, base_imgs, sync)
 
-                    for loss_func in unique_loss_funcs:
-                        batched_indices = all_batch[(loss_funcs == loss_func)]
-                        batched_edit_imgs = edit_imgs[batched_indices]
-                        batched_base_imgs = base_imgs[batched_indices]
-                        batched_context = [iter_context[i] for i in batched_indices]
-
-                        loss_G_expand += loss_func(batched_context,
-                                                   batched_base_imgs,
-                                                   batched_edit_imgs,
-                                                   self.device)
-
-                    # MAKE SURE ALL LOSS FUNCTIONS RETURN SUMS OVER BATCH, SO THEY COULD BE AVERAGED HERE.
-                    loss_G_expand = loss_G_expand / self.batch_size
-                    training_stats.report('Loss/G/expand_loss', loss_G_expand)
-
-                loss_G_recon = 0
                 if do_Grecon:
-                    with torch.no_grad():
-                        frozen_base_imgs = self.run_G_from_w(self.G_synthesis_frozen, base_w,
-                                                            sync=False)  # May get synced by Gpl.
+                    loss_G_recon = compute_reconstruction_loss(w_base, base_imgs)
 
-                    loss_G_recon_l2 = self.mse_loss(base_imgs, frozen_base_imgs)
-                    loss_G_recon_lpips = self.lpips(base_imgs, frozen_base_imgs).mean()
-                    training_stats.report('Loss/G/base_recon_l2', loss_G_recon_l2)
-                    training_stats.report('Loss/G/base_recon_lpips', loss_G_recon_lpips)
-
-                    loss_G_recon = self.lambda_recon_l2 * loss_G_recon_l2 + \
-                        self.lambda_recon_lpips * loss_G_recon_lpips
-
-            with torch.autograd.profiler.record_function(name + '_backward'):
-                (self.lambda_expand * loss_G_expand + loss_G_recon).mean().mul(gain).backward()
+            # Backpropagation
+            with torch.autograd.profiler.record_function(f'{name_suffix}_backward'):
+                total_loss = self.lambda_expand * loss_G_expand + loss_G_recon
+                total_loss.mean().mul(gain).backward()
 
         # Gmain: Maximize logits for generated images.
+        # Original code form StyleGAN2
         if do_Gmain:
             with torch.autograd.profiler.record_function('Gmain_forward'):
+                # alteraion to original code, use w
+                # ----------------
                 w = self.G_mapping(gen_z, gen_c)[:, 0]
-                if self.lambda_expand > 0:
-                    w, _ = latent_operations.project_to_subspaces(w, self.latent_basis, self.repurposed_dims, mean=self.w_avg)
-
-                # May get synced by Gpl.
-                gen_img = self.run_G_from_w(self.G_synthesis, w, sync=(sync and not do_Gpl))  # May get synced by Gpl.
-
+                gen_ws, _ = latent_operations.project_to_subspaces(w, self.latent_basis, self.repurposed_dims, mean=self.w_avg)
+                # ----------------
+                gen_img = self.run_G_from_w(self.G_synthesis, gen_ws, sync=(sync and not do_Gpl))  # May get synced by Gpl.
                 gen_logits = self.run_D(gen_img, gen_c, sync=False)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
@@ -341,16 +343,14 @@ class DomainExpansionLoss(Loss):
                 loss_Gmain.mean().mul(gain).backward()
 
         # Gpl: Apply path length regularization.
+        # Original code form StyleGAN2
         if do_Gpl:
             with torch.autograd.profiler.record_function('Gpl_forward'):
                 batch_size = gen_z.shape[0] // self.pl_batch_shrink
-                gen_img, gen_ws = self.run_G(
-                    gen_z[:batch_size], gen_c[:batch_size], sync=sync)
-                pl_noise = torch.randn_like(
-                    gen_img) / np.sqrt(gen_img.shape[2] * gen_img.shape[3])
+                gen_img, gen_ws = self.run_G(gen_z[:batch_size], gen_c[:batch_size], sync=sync)
+                pl_noise = torch.randn_like(gen_img) / np.sqrt(gen_img.shape[2] * gen_img.shape[3])
                 with torch.autograd.profiler.record_function('pl_grads'), conv2d_gradfix.no_weight_gradients():
-                    pl_grads = torch.autograd.grad(outputs=[(
-                        gen_img * pl_noise).sum()], inputs=[gen_ws], create_graph=True, only_inputs=True)[0]
+                    pl_grads = torch.autograd.grad(outputs=[( gen_img * pl_noise).sum()], inputs=[gen_ws], create_graph=True, only_inputs=True)[0]
                 pl_lengths = pl_grads.square().sum(2).mean(1).sqrt()
                 pl_mean = self.pl_mean.lerp(pl_lengths.mean(), self.pl_decay)
                 self.pl_mean.copy_(pl_mean.detach())
@@ -359,31 +359,29 @@ class DomainExpansionLoss(Loss):
                 loss_Gpl = pl_penalty * self.pl_weight
                 training_stats.report('Loss/G/reg', loss_Gpl)
             with torch.autograd.profiler.record_function('Gpl_backward'):
-                (gen_img[:, 0, 0, 0] * 0 +
-                 loss_Gpl).mean().mul(gain).backward()
+                (gen_img[:, 0, 0, 0] * 0 + loss_Gpl).mean().mul(gain).backward()
 
         # Dmain: Minimize logits for generated images.
+        # Original code form StyleGAN2
         loss_Dgen = 0
         if do_Dmain:
             with torch.autograd.profiler.record_function('Dgen_forward'):
+                # alteraion to original code, use w
+                # ----------------
                 w = self.G_mapping(gen_z, gen_c)[:, 0]
-                if self.lambda_expand > 0:
-                    # Apply the original loss (L_src) only on the base subspace.
-                    w, _ = latent_operations.project_to_subspaces(w, self.latent_basis, self.repurposed_dims, mean=self.w_avg)
-
-                # May get synced by Gpl.
-                gen_img = self.run_G_from_w(self.G_synthesis, w, sync=False)
-
+                gen_ws, _ = latent_operations.project_to_subspaces(w, self.latent_basis, self.repurposed_dims, mean=self.w_avg)
+                gen_img = self.run_G_from_w(self.G_synthesis, gen_ws, sync=False)
+                # ----------------
                 # Gets synced by loss_Dreal.
                 gen_logits = self.run_D(gen_img, gen_c, sync=False)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
-                loss_Dgen = torch.nn.functional.softplus(
-                    gen_logits)  # -log(1 - sigmoid(gen_logits))
+                loss_Dgen = torch.nn.functional.softplus(gen_logits)  # -log(1 - sigmoid(gen_logits))
             with torch.autograd.profiler.record_function('Dgen_backward'):
                 loss_Dgen.mean().mul(gain).backward()
 
         # Dmain: Maximize logits for real images.
+        # Original code form StyleGAN2
         # Dr1: Apply R1 regularization.
         if do_Dmain or do_Dr1:
             name = 'Dreal_Dr1' if do_Dmain and do_Dr1 else 'Dreal' if do_Dmain else 'Dr1'
