@@ -1,2 +1,0 @@
-{"results": {"fid50k_full": 45.24726963952051}, "metric": "fid50k_full", "total_time": 787.9552245140076, "total_time_str": "13m 08s", "num_gpus": 1, "snapshot_pkl": "ckpts/network-snapshot-000000.pkl", "timestamp": 1711080575.9017732}
-{"results": {"fid50k_full": 14.960899069435863}, "metric": "fid50k_full", "total_time": 488.71910786628723, "total_time_str": "8m 09s", "num_gpus": 1, "snapshot_pkl": "ckpts/network-snapshot-010000.pkl", "timestamp": 1711095140.9726176}
