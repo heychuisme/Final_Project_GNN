@@ -278,7 +278,7 @@ class DomainExpansionLoss(Loss):
             loss_G_expand = 0
 
             for loss_func in unique_loss_funcs:
-                indices_for_loss_func = batch_indices[(loss_funcs == loss_func)]
+                indices_for_loss_func = batch[(loss_funcs == loss_func)]
                 edit_imgs = imgs_new[indices_for_loss_func]
                 original_imgs = base_imgs[indices_for_loss_func]
                 contexts = [context_new[i] for i in indices_for_loss_func]
