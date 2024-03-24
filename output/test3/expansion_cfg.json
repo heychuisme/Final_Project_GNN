@@ -1,0 +1,32 @@
+{
+  "tasks": [
+    {
+      "type": "NADA",
+      "dimension": 254,
+      "args": {
+        "source_text": "photo of cat",
+        "target_text": "sketch"
+      }
+    },
+    {
+      "type": "NADA",
+      "dimension": 255,
+      "args": {
+        "source_text": "photo of cat",
+        "target_text": "tongue out"
+      }
+    }
+  ],
+  "tasks_losses": {
+    "NADA": {
+      "clip_models": [
+        "ViT-B/32",
+        "ViT-B/16"
+      ],
+      "clip_model_weights": [
+        1.0,
+        1.0
+      ]
+    }
+  }
+}

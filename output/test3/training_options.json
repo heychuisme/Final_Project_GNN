@@ -1,0 +1,136 @@
+{
+  "num_gpus": 1,
+  "image_snapshot_ticks": 50,
+  "network_snapshot_ticks": 50,
+  "metrics": [
+    "fid50k_full"
+  ],
+  "random_seed": 0,
+  "training_set_kwargs": {
+    "class_name": "training.dataset.ImageFolderDataset",
+    "path": "cat_128.zip",
+    "use_labels": false,
+    "max_size": 5065,
+    "xflip": true,
+    "resolution": 128
+  },
+  "data_loader_kwargs": {
+    "pin_memory": true,
+    "num_workers": 3,
+    "prefetch_factor": 2
+  },
+  "G_kwargs": {
+    "class_name": "training.networks.Generator",
+    "z_dim": 256,
+    "w_dim": 256,
+    "mapping_kwargs": {
+      "num_layers": 2
+    },
+    "synthesis_kwargs": {
+      "channel_base": 8192,
+      "channel_max": 256,
+      "num_fp16_res": 4,
+      "conv_clamp": 256
+    }
+  },
+  "D_kwargs": {
+    "class_name": "training.networks.Discriminator",
+    "block_kwargs": {},
+    "mapping_kwargs": {},
+    "epilogue_kwargs": {
+      "mbstd_group_size": 4
+    },
+    "channel_base": 8192,
+    "channel_max": 256,
+    "num_fp16_res": 4,
+    "conv_clamp": 256
+  },
+  "G_opt_kwargs": {
+    "class_name": "torch.optim.Adam",
+    "lr": 0.0025,
+    "betas": [
+      0,
+      0.99
+    ],
+    "eps": 1e-08
+  },
+  "D_opt_kwargs": {
+    "class_name": "torch.optim.Adam",
+    "lr": 0.0025,
+    "betas": [
+      0,
+      0.99
+    ],
+    "eps": 1e-08
+  },
+  "loss_kwargs": {
+    "class_name": "training.loss.DomainExpansionLoss",
+    "r1_gamma": 0.1024,
+    "subspace_distance": 20.0,
+    "batch_size": 32,
+    "lambda_recon_l2": 10.0,
+    "lambda_recon_lpips": 10.0,
+    "lambda_expand": 1.0,
+    "lambda_src": 1.0,
+    "expansion_cfg": {
+      "tasks": [
+        {
+          "type": "NADA",
+          "dimension": 254,
+          "args": {
+            "source_text": "photo of cat",
+            "target_text": "sketch"
+          }
+        },
+        {
+          "type": "NADA",
+          "dimension": 255,
+          "args": {
+            "source_text": "photo of cat",
+            "target_text": "tongue out"
+          }
+        }
+      ],
+      "tasks_losses": {
+        "NADA": {
+          "clip_models": [
+            "ViT-B/32",
+            "ViT-B/16"
+          ],
+          "clip_model_weights": [
+            1.0,
+            1.0
+          ]
+        }
+      }
+    }
+  },
+  "total_kimg": 25000,
+  "batch_size": 32,
+  "batch_gpu": 32,
+  "ema_kimg": 10.0,
+  "ema_rampup": 0.05,
+  "ada_target": 0.6,
+  "augment_kwargs": {
+    "class_name": "training.augment.AugmentPipe",
+    "xflip": 1,
+    "rotate90": 1,
+    "xint": 1,
+    "scale": 1,
+    "rotate": 1,
+    "aniso": 1,
+    "xfrac": 1,
+    "brightness": 1,
+    "contrast": 1,
+    "lumaflip": 1,
+    "hue": 1,
+    "saturation": 1
+  },
+  "wandb_log": false,
+  "run_name": "test3",
+  "run_tag": "0",
+  "debug": false,
+  "latent_factors_path": null,
+  "kimg_per_tick": 32,
+  "run_dir": "output\\test3"
+}
