@@ -1,1 +1,0 @@
-python train.py --outdir output --data cat_128.zip --mirror 1 --wandb_log False --name test3 --tag 0 --expansion_cfg_file config\nada.json
